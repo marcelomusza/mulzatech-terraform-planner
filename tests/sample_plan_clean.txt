@@ -1,0 +1,8 @@
+azurerm_resource_group.main: Refreshing state... [id=/subscriptions/00000000-1111-2222-3333-444444444444/resourceGroups/mulzatech-doom-rg]
+azurerm_container_app_environment.main: Refreshing state...
+azurerm_container_app.main: Refreshing state...
+
+No changes. Your infrastructure matches the configuration.
+
+Terraform has compared your real infrastructure against your configuration
+and found no differences, so no changes are needed.

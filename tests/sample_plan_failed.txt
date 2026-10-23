@@ -1,0 +1,10 @@
+azurerm_resource_group.main: Refreshing state...
+azurerm_container_app_environment.main: Refreshing state...
+
+Error: reading Container App Environment (Subscription: "00000000-1111-2222-3333-444444444444"
+Resource Group Name: "mulzatech-doom-rg"
+Managed Environment Name: "mulzatech-doom-env"): unexpected status 403 (403 Forbidden) with error: AuthorizationFailed: The client '99999999-8888-7777-6666-555555555555' with object id 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' does not have authorization to perform action 'Microsoft.App/managedEnvironments/read' over scope '/subscriptions/00000000-1111-2222-3333-444444444444/resourceGroups/mulzatech-doom-rg/providers/Microsoft.App/managedEnvironments/mulzatech-doom-env' or the scope is invalid.
+
+  with azurerm_container_app_environment.main,
+  on main.tf line 10, in resource "azurerm_container_app_environment" "main":
+  10: resource "azurerm_container_app_environment" "main" {

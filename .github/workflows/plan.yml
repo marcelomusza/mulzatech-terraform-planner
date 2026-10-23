@@ -1,0 +1,159 @@
+name: Terraform plan
+
+on:
+  workflow_call:
+    inputs:
+      terraform-version:
+        type: string
+        required: true
+      working-directory:
+        type: string
+        default: infra
+      planner-ref:
+        description: Commit SHA of this repo to take plan_comment.py from. Use the same SHA as in `uses:`.
+        type: string
+        required: true
+      container-app-name:
+        description: Optional. If set, the live image of this container app is passed to the plan so it only shows the PR's own change.
+        type: string
+        default: ""
+      resource-group:
+        type: string
+        default: ""
+      image-variable:
+        description: Name of the Terraform variable that holds the container image.
+        type: string
+        default: container_image
+    secrets:
+      AZURE_CLIENT_ID:
+        required: true
+      AZURE_TENANT_ID:
+        required: true
+      AZURE_SUBSCRIPTION_ID:
+        required: true
+      ANTHROPIC_API_KEY:
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  plan:
+    # Fork PRs get no secrets, so skip them cleanly instead of failing.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    concurrency:
+      group: terraform-plan-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    env:
+      ARM_USE_CLI: "true"
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+    steps:
+      - name: Check out the PR
+        uses: actions/checkout@v4
+        with:
+          path: target
+
+      - name: Check out the planner
+        uses: actions/checkout@v4
+        with:
+          repository: marcelomusza/mulzatech-terraform-planner
+          ref: ${{ inputs.planner-ref }}
+          path: planner
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r planner/requirements.txt
+
+      - name: Sign in to Azure (read-only identity)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+
+      - name: Look up the live container image
+        id: image
+        if: inputs.container-app-name != ''
+        env:
+          SUBSCRIPTION: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          RESOURCE_GROUP: ${{ inputs.resource-group }}
+          APP_NAME: ${{ inputs.container-app-name }}
+        run: |
+          IMAGE=$(az resource show \
+            --ids "/subscriptions/$SUBSCRIPTION/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.App/containerApps/$APP_NAME" \
+            --api-version 2024-03-01 \
+            --query "properties.template.containers[0].image" -o tsv)
+          if ! [[ "$IMAGE" =~ ^[A-Za-z0-9./:_@-]+$ ]]; then
+            echo "Could not read a valid image reference for the live container app."
+            exit 1
+          fi
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Terraform plan (read-only, never applies)
+        id: plan
+        working-directory: target/${{ inputs.working-directory }}
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+          IMAGE_VARIABLE: ${{ inputs.image-variable }}
+        run: |
+          set +e
+          VAR_ARGS=()
+          if [ -n "$IMAGE" ]; then VAR_ARGS=(-var "$IMAGE_VARIABLE=$IMAGE"); fi
+
+          terraform init -input=false -no-color > "$RUNNER_TEMP/init.txt" 2>&1
+          CODE=$?
+          if [ $CODE -ne 0 ]; then
+            cp "$RUNNER_TEMP/init.txt" "$RUNNER_TEMP/plan.txt"
+          else
+            terraform plan -input=false -lock=false -no-color -detailed-exitcode \
+              "${VAR_ARGS[@]}" > "$RUNNER_TEMP/plan.txt" 2>&1
+            CODE=$?
+          fi
+          # 0 = no changes, 2 = changes, anything else = the plan failed.
+          if [ $CODE -ne 0 ] && [ $CODE -ne 2 ]; then echo "failed=true" >> "$GITHUB_OUTPUT"; fi
+          exit 0
+
+      - name: Build the comment
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          PLAN_FAILED: ${{ steps.plan.outputs.failed }}
+        run: |
+          FLAGS=()
+          if [ "$PLAN_FAILED" = "true" ]; then FLAGS=(--failed); fi
+          python planner/plan_comment.py "$RUNNER_TEMP/plan.txt" "${FLAGS[@]}" > "$RUNNER_TEMP/comment.md"
+
+      - name: Post or update the PR comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          EXISTING=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | contains("<!-- mulzatech-terraform-planner -->"))) | .id' \
+            | head -n1)
+          if [ -n "$EXISTING" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" -F body=@"$RUNNER_TEMP/comment.md"
+          else
+            gh pr comment "$PR" --repo "$REPO" --body-file "$RUNNER_TEMP/comment.md"
+          fi
+
+      - name: Fail the check if the plan failed
+        if: steps.plan.outputs.failed == 'true'
+        run: |
+          echo "terraform plan failed; see the PR comment for the output."
+          exit 1
