@@ -76,7 +76,10 @@ Terraform output; they are not from a real environment.
   would add a manual approval).
 - **State can contain sensitive attributes**, so the read identity is not
   harmless, only read-only.
-- **Redaction is best effort**: it covers the three Azure IDs and any
-  `/subscriptions/<guid>` path, not every possible identifier.
+- **Redaction is best effort**: it covers the three Azure IDs, any
+  `/subscriptions/<guid>` path, and base64 tokens that decode to GUIDs (the
+  `azurerm_client_config` data source id is one), not every possible
+  identifier. A first version missed the base64 case and leaked IDs into a
+  public test comment, which was deleted.
 - The summary is advisory and can be wrong. The plan output above it is the
   source of truth.
